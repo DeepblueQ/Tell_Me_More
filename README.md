@@ -149,6 +149,16 @@ We use the [test split](https://github.com/HBX-hbx/Mistral-Interact/blob/master/
   python src/stats.py
   ```
 
+- If you want to validate the interaction quality on a new dataset like the provided **2000.csv** in the repository root, run the interactive tester directly against that file. The script will automatically read the Excel-formatted CSV and use the `user_query` column as tasks.
+
+  ```bash
+  python src/test_one_new.py \
+    --model_name mistral-interact \
+    --model_name_or_path <path-to-weights> \
+    --data_dir 2000.csv \
+    --output_dir <where-to-save-records>
+  ```
+
 - Finally merge the results.
 
   ```python
