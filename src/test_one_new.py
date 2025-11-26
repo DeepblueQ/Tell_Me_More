@@ -4,6 +4,9 @@ import os
 import random
 import copy
 import json
+import csv
+import zipfile
+from xml.etree import ElementTree as ET
 from cprint import cprint
 from IPython import embed
 from model_center.model import Llama
@@ -111,21 +114,95 @@ def setup_model_and_tokenizer(args):
     model = get_model(args)
     return tokenizer, model
 
+def _column_letter_to_index(col_letters: str) -> int:
+    idx = 0
+    for char in col_letters.upper():
+        if not char.isalpha():
+            break
+        idx = idx * 26 + ord(char) - ord('A') + 1
+    return idx - 1
+
+def _read_first_sheet(file_path: str):
+    with zipfile.ZipFile(file_path) as z:
+        shared_strings = []
+        if 'xl/sharedStrings.xml' in z.namelist():
+            shared_xml = ET.fromstring(z.read('xl/sharedStrings.xml'))
+            shared_strings = [''.join(t.itertext()) for t in shared_xml]
+
+        sheet = ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
+        ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        rows = []
+        for row in sheet.findall(f'.//{ns}row'):
+            row_dict = {}
+            for cell in row.findall(f'{ns}c'):
+                ref = cell.get('r', '')
+                col_idx = _column_letter_to_index(''.join(filter(str.isalpha, ref)))
+                value_node = cell.find(f'{ns}v')
+                if cell.get('t') == 's' and value_node is not None and shared_strings:
+                    cell_value = shared_strings[int(value_node.text)]
+                else:
+                    cell_value = value_node.text if value_node is not None else ''
+                row_dict[col_idx] = cell_value if cell_value is not None else ''
+            rows.append(row_dict)
+    if not rows:
+        return []
+
+    header_width = max(rows[0].keys()) + 1
+    headers = [''] * header_width
+    for idx, name in rows[0].items():
+        headers[idx] = name
+
+    parsed_rows = []
+    for row in rows[1:]:
+        values = [''] * header_width
+        for idx, value in row.items():
+            if idx < header_width:
+                values[idx] = value
+        parsed_rows.append(dict(zip(headers, values)))
+    return parsed_rows
+
+def _load_tabular_tasks(file_path: str):
+    records = []
+    if zipfile.is_zipfile(file_path):
+        records = _read_first_sheet(file_path)
+    else:
+        with open(file_path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            records = list(reader)
+
+    candidate_task_keys = ["user_query", "task", "instruction"]
+    tasks = []
+    for record in records:
+        task = None
+        for key in candidate_task_keys:
+            if record.get(key):
+                task = record[key].strip()
+                break
+        if task:
+            tasks.append({"task": task})
+    return tasks
+
 def preprocess_data(task):
     test_prompt = f"<s>User: {SYS_PROMPT}\n\nHere is the task:\n{task}\nAgent: "
     return {"task": task, "prompt": test_prompt}
 
 def load_raw_dataset(args, tokenizer):
     tasks = []
-    with open(args.data_dir, 'r', encoding='utf-8') as f:
-        for line in f:
-            task = json.loads(line)["task"]
-            if args.model_name == "mistral-interact" or args.model_name == "llama2-interact":
-                processed_task = preprocess_data(task)
-            else:
-                raise ValueError(f"Not supported model {args.model_name}")
+    if args.data_dir.endswith('.jsonl'):
+        with open(args.data_dir, 'r', encoding='utf-8') as f:
+            for line in f:
+                task = json.loads(line)["task"]
+                if args.model_name == "mistral-interact" or args.model_name == "llama2-interact":
+                    processed_task = preprocess_data(task)
+                else:
+                    raise ValueError(f"Not supported model {args.model_name}")
+                tasks.append(processed_task)
+    else:
+        tabular_tasks = _load_tabular_tasks(args.data_dir)
+        for task in tabular_tasks:
+            processed_task = preprocess_data(task["task"])
             tasks.append(processed_task)
-    
+
     # random.seed(233)
     # random.shuffle(tasks)
     return tasks[args.start_from:]
